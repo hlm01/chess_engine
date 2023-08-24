@@ -39,9 +39,10 @@ class MCTS:
                 self.root.parent = None
                 print(f"found {move} with {child.visits} visits")
                 return
-        self.root = Node(None, list(self.initial.legal_moves), None, self.NOT_TERMINAL, self.board.turn)
+        self.root = Node(None, list(self.initial.legal_moves), None, self.NOT_TERMINAL, self.initial.turn)
 
     def search(self, budget=10000):
+        print(self.root.turn)
         start = perf_counter()
         self.iters = 0
         while self.iters < budget:
@@ -85,6 +86,10 @@ class MCTS:
                 board_tensor = eval.board_to_numpy(self.board)
                 batch[i] = board_tensor
             child = Node(s, list(self.board.legal_moves), a, terminal, not s.turn)
+            if terminal != self.NOT_TERMINAL:
+                child.wins = terminal if s.turn == chess.WHITE else -terminal
+                child.visits = 1
+                wins += terminal
             s.children.append((a, child))
             self.board.pop()
 
@@ -93,12 +98,11 @@ class MCTS:
             with torch.no_grad():
                 values = self.net(batch).cpu().numpy()
             for i, (_, child) in enumerate(s.children):
-                child.wins = values[i]
-                wins += values[i]
-                child.visits = 1
+                if child.terminal == self.NOT_TERMINAL:
+                    child.wins = values[i] if s.turn == chess.WHITE else -values[i]
+                    wins += values[i]
+                    child.visits = 1
         s.untried = []
-        s.wins += wins
-        s.visits += count
         self.iters += count
         return s, wins, count
 
@@ -107,7 +111,7 @@ class MCTS:
         best_ucb = -1000
         for a, child in node.children:
             # UCB calculation
-            ucb = child.wins / child.visits + self.c * math.sqrt(math.log(node.visits)) / (1 + child.visits)
+            ucb = child.wins / child.visits + self.c * math.sqrt(math.log(node.visits) / child.visits)
             if ucb > best_ucb:
                 best_ucb = ucb
                 best_child_node = child
@@ -142,7 +146,8 @@ def uci():
     nn = eval.NeuralNetwork().cuda()
     nn.load_state_dict(torch.load("model.pt"))
     nn.eval()
-    tree = MCTS(board, nn, 2)
+    tree = MCTS(board, nn, 1.4)
+    previous = ""
     while True:
         command = input()
         if command == "uci":
@@ -157,14 +162,18 @@ def uci():
             board = chess.Board()
 
         elif command.startswith("position"):
-            tree = MCTS(parse_uci_position(command), nn, 1)
+            if command != previous and not command.strip().endswith("startpos"):
+                tree.push_move(chess.Move.from_uci(command.split()[-1]))
+                previous = command
         elif command.startswith("go"):
             # Extract any additional parameters from the "go" command if needed
             # (e.g., time, depth, move-time, etc.)
             # Call the MCTS function to find the best move
-
-            print(f"info score cp {round(nn.predict(tree.initial) * 100)}")
-            print("bestmove", tree.search(50000))
+            if len(board.move_stack) < 2:
+                print("bestmove", tree.search(20000))
+            else:
+                print(f"info score cp {round(nn.predict(tree.initial) * 100)}")
+                print("bestmove", tree.search(100000))
         elif command == "quit":
             break
 
